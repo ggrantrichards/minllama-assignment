@@ -44,7 +44,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
         """
         # todo
-        raise NotImplementedError
+        rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
+        return x / rms
 
     def forward(self, x):
         """
@@ -94,8 +95,19 @@ class Attention(nn.Module):
         attention matrix before applying it to the value tensor.
         '''
         # todo
-        raise NotImplementedError
-
+        # attention = softmax(query @ key^T / sqrt(head_dim)) * value
+        # shape bs, n_local_heads, seqlen, head_dim
+        # compute attention for all n_local_heads at once
+        # use self.attn_dropout on the computed attention matrix
+        scores = torch.matmul(query, key.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        mask = torch.triu(torch.ones(scores.shape[-2:], device=scores.device), diagonal=1).bool()
+        scores = scores.masked_fill(mask, float('-inf'))
+        
+        weights = F.softmax(scores, dim=-1)
+        weights = self.attn_dropout(weights)
+        attention = torch.matmul(weights, value)
+        return attention
+        
     def forward(
         self,
         x: torch.Tensor
@@ -197,7 +209,14 @@ class LlamaLayer(nn.Module):
            output of the feed-forward network
         '''
         # todo
-        raise NotImplementedError
+        attention_input = self.attention_norm(x)
+        attention_output = self.attention(attention_input)
+        x = x + attention_output
+        ffn_input = self.ffn_norm(x)
+        ffn_output = self.feed_forward(ffn_input)
+        x = x + ffn_output
+        return x
+        
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
@@ -245,16 +264,19 @@ class Llama(LlamaPreTrainedModel):
 
         for layer in self.layers:
             h = layer(h)
+
+        hidden_states_for_check = h
         h = self.norm(h)
 
         if targets is not None:
-            # if we are given some desired targets also calculate the loss
             logits = self.output(h)
+            return logits, hidden_states_for_check
         else:
             # inference-time mini-optimization: only forward the output on the very last position
-            logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
-
-        return logits, h
+            # logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            logits = self.output(h[:, [-1], :])
+            h_out = hidden_states_for_check[:, [-1], :]
+            return logits, h_out
 
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0):
@@ -273,12 +295,10 @@ class Llama(LlamaPreTrainedModel):
             # forward the model to get the logits for the index in the sequence
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] # crop to just the final time step
-            # todo
-            raise NotImplementedError
 
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = None
+                idx_next = torch.argmax(logits, dim=-1, keepdim=True)
             else:
                 '''
                 Perform temperature sampling:
@@ -289,10 +309,11 @@ class Llama(LlamaPreTrainedModel):
 
                 Note that we are not using top-k sampling/nucleus sampling in this procedure.
                 '''
-                idx_next = None
+                scale = logits / temperature
+                probs = F.softmax(scale, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-
 
         return idx
 
@@ -317,4 +338,5 @@ def load_pretrained(checkpoint):
       if k.startswith(unwanted_prefix):
           state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
   model.load_state_dict(state_dict, strict=False)
+  model.eval()
   return model

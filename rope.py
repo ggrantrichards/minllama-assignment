@@ -51,7 +51,7 @@ def apply_rotary_emb(
     _, seqlen, _, _ = query.shape
     device = query.device
     # todo
-    #
+
     # Please refer to slide 22 in https://phontron.com/class/anlp2024/assets/slides/anlp-05-transformers.pdf
     # and Section 3 in https://arxiv.org/abs/2104.09864.
 
@@ -63,13 +63,38 @@ def apply_rotary_emb(
 
     # First, compute the trigonometric values in the second and fourth columns in
     # slide 22 (linked above).
+    
+    # m = position index
+    # i is index of pair
+    # theta = rotary frequency for pair
+
+    query_real, query_imag = query.float().reshape(query.shape[:-1] + (-1, 2)).unbind(-1)
+    key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
+
+    i = torch.arange(0, head_dim, 2, device=device).float()
+    inv_freq = 1.0 / (theta ** (i / head_dim))
+
+    positions = torch.arange(seqlen, device=device).float()
+    freqs_cis = torch.outer(positions, inv_freq)
+    
+    cos = torch.cos(freqs_cis)
+    sin = torch.sin(freqs_cis)
+
+    cos = reshape_for_broadcast(cos, query_real)
+    sin = reshape_for_broadcast(sin, query_real)
+
+    query_out_real = query_real * cos - query_imag * sin
+    query_out_imag = query_real * sin + query_imag * cos
+    
+    key_out_real = key_real * cos - key_imag * sin
+    key_out_imag = key_real * sin + key_imag * cos
 
     # Then, combine these trigonometric values with the tensors query_real, query_imag,
     # key_real, and key_imag.
 
-    raise NotImplementedError
+    # dot product of embeddings result in a function of relative position
 
-    query_out = None
-    key_out = None
-    # Return the rotary position embeddings for the query and key tensors
+    query_out = torch.stack((query_out_real, query_out_imag), dim=-1).flatten(-2)
+    key_out = torch.stack((key_out_real, key_out_imag), dim=-1).flatten(-2)
+
     return query_out, key_out
