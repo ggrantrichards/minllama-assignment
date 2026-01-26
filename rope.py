@@ -30,71 +30,43 @@ def apply_rotary_emb(
     max_seq_len: int,
     theta: float = 10000.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor.
-
-    This function applies rotary embeddings to the given query and key tensors. The rotation to each token
-    embedding is a function of that token's position in the sequence, head_dim, and theta.
-    The input tensors are reshaped as complex numbers to simplify your implementation.
-
-    Args:
-        query (torch.Tensor): Query tensor to apply rotary embeddings.
-                              Shape: (batch_size, seqlen, n_local_heads, self.head_dim)
-        key (torch.Tensor): Key tensor to apply rotary embeddings.
-                              Shape: (batch_size, seqlen, n_local_kv_heads, self.head_dim)
-        head_dim (int): Dimension of each attention head.
-        max_seq_len (int): Maximum sequence length supported by model.
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-    """
-
+    
     _, seqlen, _, _ = query.shape
     device = query.device
-    # todo
 
-    # Please refer to slide 22 in https://phontron.com/class/anlp2024/assets/slides/anlp-05-transformers.pdf
-    # and Section 3 in https://arxiv.org/abs/2104.09864.
-
-    # reshape xq and xk to match the complex representation
-    query_real, query_imag = query.float().reshape(query.shape[:-1] + (-1, 2)).unbind(-1)
-    key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
-    # This separates each query/key vector into its odd and even indices (assuming *one-indexing*).
-    # query_real contains q_1, q_3, q_5, ... and query_imag contains q_2, q_4, q_6, ...
-
-    # First, compute the trigonometric values in the second and fourth columns in
-    # slide 22 (linked above).
-    
-    # m = position index
-    # i is index of pair
-    # theta = rotary frequency for pair
-
+    # 1. Reshape to separate real/imag parts: (bs, seqlen, heads, head_dim/2, 2)
+    # This "Interleaved" logic is correct for llama2.c / stories42M.pt
     query_real, query_imag = query.float().reshape(query.shape[:-1] + (-1, 2)).unbind(-1)
     key_real, key_imag = key.float().reshape(key.shape[:-1] + (-1, 2)).unbind(-1)
 
+    # 2. Compute frequencies
+    # i = [0, 2, ..., head_dim-2]
     i = torch.arange(0, head_dim, 2, device=device).float()
+    
+    # Calculate inv_freq using the exact llama2.c formula
     inv_freq = 1.0 / (theta ** (i / head_dim))
-
+    
     positions = torch.arange(seqlen, device=device).float()
+    
+    # Outer product: (seqlen, head_dim/2)
     freqs_cis = torch.outer(positions, inv_freq)
     
     cos = torch.cos(freqs_cis)
     sin = torch.sin(freqs_cis)
 
+    # 3. Broadcast dimensions to match query_real
     cos = reshape_for_broadcast(cos, query_real)
     sin = reshape_for_broadcast(sin, query_real)
 
+    # 4. Apply Rotation (Standard Complex Multiplication)
     query_out_real = query_real * cos - query_imag * sin
     query_out_imag = query_real * sin + query_imag * cos
     
     key_out_real = key_real * cos - key_imag * sin
     key_out_imag = key_real * sin + key_imag * cos
 
-    # Then, combine these trigonometric values with the tensors query_real, query_imag,
-    # key_real, and key_imag.
-
-    # dot product of embeddings result in a function of relative position
-
+    # 5. Stack and flatten back to (bs, seqlen, heads, head_dim)
     query_out = torch.stack((query_out_real, query_out_imag), dim=-1).flatten(-2)
     key_out = torch.stack((key_out_real, key_out_imag), dim=-1).flatten(-2)
 
-    return query_out, key_out
+    return query_out.type_as(query), key_out.type_as(key)

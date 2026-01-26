@@ -46,6 +46,7 @@ class RMSNorm(torch.nn.Module):
         # todo
         rms = torch.sqrt(torch.mean(x**2, dim=-1, keepdim=True) + self.eps)
         return x / rms
+        # return x / (torch.sqrt(x.pow(2).mean(-1, keepdim=True)) + self.eps)
 
     def forward(self, x):
         """
@@ -273,7 +274,6 @@ class Llama(LlamaPreTrainedModel):
             return logits, hidden_states_for_check
         else:
             # inference-time mini-optimization: only forward the output on the very last position
-            # logits = self.output(h[:, [-1], :]) # note: using list [-1] to preserve the time dim
             logits = self.output(h[:, [-1], :])
             h_out = hidden_states_for_check[:, [-1], :]
             return logits, h_out
@@ -329,7 +329,7 @@ def load_pretrained(checkpoint):
   ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
   # init from a model saved in a specific directory
-  checkpoint_dict = torch.load(checkpoint, map_location=device)
+  checkpoint_dict = torch.load(checkpoint, map_location=device, weights_only=False)
   config = LlamaConfig(**checkpoint_dict['model_args'])
   model = Llama(config)
   state_dict = checkpoint_dict['model']
