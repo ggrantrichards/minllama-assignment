@@ -312,14 +312,12 @@ class Llama(LlamaPreTrainedModel):
                 scale = logits / temperature
                 probs = F.softmax(scale, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)
-            # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
 
 def load_pretrained(checkpoint):
   device = 'cuda' if torch.cuda.is_available() else 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-  #dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
   dtype = "float32"
 
   torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
@@ -328,15 +326,27 @@ def load_pretrained(checkpoint):
   ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
   ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-  # init from a model saved in a specific directory
   checkpoint_dict = torch.load(checkpoint, map_location=device, weights_only=False)
   config = LlamaConfig(**checkpoint_dict['model_args'])
   model = Llama(config)
   state_dict = checkpoint_dict['model']
+  
+
+  keys_to_rename = []
+  for k in state_dict.keys():
+      if "attention.wq" in k: keys_to_rename.append((k, k.replace("attention.wq", "attention.compute_query")))
+      elif "attention.wk" in k: keys_to_rename.append((k, k.replace("attention.wk", "attention.compute_key")))
+      elif "attention.wv" in k: keys_to_rename.append((k, k.replace("attention.wv", "attention.compute_value")))
+      elif "attention.wo" in k: keys_to_rename.append((k, k.replace("attention.wo", "attention.compute_output")))
+  
+  for old_key, new_key in keys_to_rename:
+      state_dict[new_key] = state_dict.pop(old_key)
+
   unwanted_prefix = '_orig_mod.'
   for k,v in list(state_dict.items()):
       if k.startswith(unwanted_prefix):
           state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+          
   model.load_state_dict(state_dict, strict=False)
   model.eval()
   return model
